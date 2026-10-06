@@ -82,6 +82,8 @@ from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.orchestrator import TaskOrchestrator, TaskPlan, TaskStep
+from core.task_manager import TaskManager
+from core.friend_personality import DEFAULT_FRIEND_POLICY
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
@@ -298,13 +300,14 @@ def _get_api_key() -> str:
 
 def _load_system_prompt() -> str:
     try:
-        return PROMPT_PATH.read_text(encoding="utf-8")
+        base = PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
-        return (
-            "You are JARVIS, Tony Stark's AI assistant. "
+        base = (
+            "You are JARVIS, a personal AI assistant. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
+    return base + "\n\nJARVIS 2.0 FRIEND POLICY\n" + DEFAULT_FRIEND_POLICY.system_rules()
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
@@ -607,6 +610,7 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        self._task_manager = TaskManager(max_concurrent=3)  # long-running work registry
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback

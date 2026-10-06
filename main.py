@@ -81,6 +81,7 @@ from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
+from core.orchestrator import TaskOrchestrator, TaskPlan, TaskStep
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
@@ -633,6 +634,25 @@ class JarvisLive:
             logger=lambda msg: print(f"[Plugins] {msg}"),
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
         )
+        # JARVIS 2.0 execution engine: ordinary action failures are retried,
+        # and action results are checked before being reported as success.
+        async def _execute_registered_step(step):
+            _ctx = {"player": self.ui, "speak": self.speak,
+                    "response": None, "session_memory": None}
+            return await asyncio.get_running_loop().run_in_executor(
+                None, lambda: self._action_registry.run(step.action, step.args, _ctx)
+            )
+
+        async def _verify_registered_step(step, value):
+            text = str(value or "").strip().lower()
+            return bool(text) and not text.startswith(("error", "failed", "unknown tool"))
+
+        self._orchestrator = TaskOrchestrator(
+            _execute_registered_step,
+            verifier=_verify_registered_step,
+            max_task_seconds=900.0,
+        )
+
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
@@ -1243,10 +1263,22 @@ class JarvisLive:
                 # file_processor: fall back to the currently-uploaded file when none is given
                 if name == "file_processor" and not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
-                _ctx = {"player": self.ui, "speak": self.speak,
-                        "response": None, "session_memory": None}
-                r = await loop.run_in_executor(None, lambda: self._action_registry.run(name, args, _ctx))
-                result = r or "Done."
+                plan = TaskPlan(
+                    goal=f"Execute action {name}",
+                    steps=[TaskStep(
+                        id=name,
+                        description=f"Execute {name}",
+                        action=name,
+                        args=args,
+                        retries=2,
+                        verify=True,
+                    )],
+                )
+                task_result = await self._orchestrator.run(plan)
+                if task_result.ok:
+                    result = task_result.results.get(name) or "Done."
+                else:
+                    result = f"Action failed after recovery attempts: {task_result.error}"
                 # web_search: mirror results to the on-screen content panel
                 if (name == "web_search" and r
                         and not r.startswith("No results")
